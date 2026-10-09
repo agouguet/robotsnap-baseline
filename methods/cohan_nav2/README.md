@@ -66,8 +66,13 @@ robotsnap-baseline run cohan_nav2
 tmux attach -t cohan
 ```
 
-Six fenetres : `unity`, `bridge`, `cohan` (la pile nav2), `agents` (le pont des
-agents, l'horloge et les nœuds CoHAN), `rviz`, `goal`.
+Sept fenetres : `unity`, `bridge`, `cohan` (la pile nav2), `agents` (le pont des
+agents, l'horloge et les alias de reperes), `cohan_agents` (les nœuds de foule de
+CoHAN-Nav2), `control` (passe le robot sous ROS), `rviz`, `goal`.
+
+La fenetre `control` compte : nav2 planifie et publie `/cmd_vel`, mais le robot
+ne lit `/cmd_vel` qu'une fois son controleur d'entree en mode ROS. Sans elle, la
+pile a l'air en bonne sante et le robot ne bouge jamais.
 
 `./run.sh --stop` arrete la session.
 

@@ -25,6 +25,7 @@ SESSION=drl_vo
 ROBOT=robot_1
 
 MODEL="${HERE}/model/drl_vo.zip"
+RVIZ_CONFIG="${HERE}/drl_vo.rviz"
 GOAL_HINT="$(method_env_value "${NAME}" GOAL_HINT)"
 
 usage() {
@@ -40,6 +41,8 @@ Start DRL-VO and RobotSNAP in a tmux session named '${SESSION}'.
   -h, --help    show this help
 
 Windows: unity bridge drl_vo control rviz goal.
+The 'rviz' window has two panes: the world view, and the markers of
+tools/scene_markers.py that put the pedestrians and the goal on it.
 In the 'goal' window: ${GOAL_HINT}
 EOF
 }
@@ -109,11 +112,16 @@ tmux select-layout -t "${SESSION}:drl_vo" tiled
 # -- control: hand the robot to ROS --------------------------------------------
 window_control "${SESSION}" "${HERE}" "${ENV_PREFIX}" "${ROBOT}"
 
-# -- rviz ---------------------------------------------------------------------
-window_rviz "${SESSION}" "${HERE}" "${ENV_PREFIX}"
+# -- rviz: the world view, and the markers RViz cannot build on its own -------
+# /simulation/agents and the goal are JSON, so RViz draws neither; the marker
+# node turns them into the crowd and the goal the view would otherwise miss.
+window_rviz "${SESSION}" "${HERE}" "${ENV_PREFIX}" "${RVIZ_CONFIG}"
+pane_split "${SESSION}:rviz" -v "${HERE}" \
+    "${ENV_PREFIX} && exec $(venv_python) $(baseline_root)/tools/scene_markers.py --robot ${ROBOT}"
+tmux select-layout -t "${SESSION}:rviz" tiled
 
 # -- goal ---------------------------------------------------------------------
 window_goal "${SESSION}" "${HERE}" "${ENV_PREFIX}" "${GOAL_HINT}"
 
 session_close "${SESSION}" "robotsnap-baseline stop ${NAME}" \
-    "unity bridge drl_vo control rviz goal"
+    "unity bridge drl_vo control rviz(2) goal"

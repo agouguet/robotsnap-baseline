@@ -34,18 +34,18 @@ construit (l'application, `robotsnap/src`, `venv_robotSNAP`). Le dépôt est pos
 à côté des autres, dans cet espace de travail.
 
 ```bash
-./bin/robotsnap-baseline doctor            # ce qui manque sur cette machine
-./bin/robotsnap-baseline list              # les méthodes disponibles
+./robotsnap-baseline doctor            # ce qui manque sur cette machine
+./robotsnap-baseline list              # les méthodes disponibles
 
-./bin/robotsnap-baseline install cohan_nav2
-./bin/robotsnap-baseline check   cohan_nav2
-./bin/robotsnap-baseline run     cohan_nav2
+./robotsnap-baseline install cohan_nav2
+./robotsnap-baseline check   cohan_nav2
+./robotsnap-baseline run     cohan_nav2
 
 # dans une autre fenêtre, une fois la pile démarrée :
 #   tmux attach -t cohan
 #   robot => goal :  python send_goal.py X Y [YAW_DEG]
 
-./bin/robotsnap-baseline stop    cohan_nav2
+./robotsnap-baseline stop    cohan_nav2
 ```
 
 `run` ouvre une session `tmux`, une fenêtre par responsabilité : le simulateur,
@@ -70,10 +70,10 @@ env <méthode>       l'environnement dans lequel la méthode tourne
 ## Architecture
 
 ```
-bin/robotsnap-baseline   le point d'entrée unique
+robotsnap-baseline       le point d'entrée unique
 lib/common.sh            ce que toutes les méthodes partagent
 pins.env                 toutes les versions, à un seul endroit
-tools/                   les outils partagés (le passage du robot sous ROS)
+tools/                   les outils partagés (le robot sous ROS, la vue RViz)
 methods/<méthode>/
     method.env           ce que la méthode est et ce dont elle a besoin
     install.sh           la préparer

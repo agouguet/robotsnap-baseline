@@ -21,8 +21,8 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../lib/common.sh
-. "${HERE}/../lib/common.sh"
+# shellcheck source=lib/common.sh
+. "${HERE}/lib/common.sh"
 
 usage() {
     sed -n '3,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'

@@ -9,6 +9,7 @@
 #   cohan    - the nav2 stack (planner, controller, bt_navigator, behaviors)
 #   agents   - our /tracked_agents bridge, the clock and the frame aliases
 #   cohan_agents - CoHAN-Nav2's own crowd nodes
+#   control  - hands the robot to ROS, so /cmd_vel is what drives it
 #   rviz     - rviz2 with CoHAN's own configuration
 #   goal     - a shell ready to run send_goal.py
 set -euo pipefail
@@ -20,6 +21,11 @@ source_pins
 
 NAME=cohan_nav2
 SESSION=cohan
+# The whole stack is wired to the primary robot's bare topic names - the
+# parameters, the agents bridge and the frame aliases all read `/odom` and
+# `/scan` - so the robot handed to ROS is that one, and there is no flag to
+# point it elsewhere while those stay fixed.
+ROBOT=robot_1
 
 COHAN_WS="${COHAN_WS:-$(baseline_root)/$(method_env_value "${NAME}" WORKSPACE)}"
 COHAN_SETUP="${COHAN_WS}/install/setup.bash"
@@ -40,7 +46,7 @@ Start CoHAN-Nav2 and RobotSNAP in a tmux session named '${SESSION}'.
   --stop       stop the '${SESSION}' session and launch nothing
   -h, --help   show this help
 
-Windows: unity bridge cohan agents cohan_agents rviz goal.
+Windows: unity bridge cohan agents cohan_agents control rviz goal.
 In the 'goal' window: ${GOAL_HINT}
 EOF
 }
@@ -127,6 +133,12 @@ pane_split "${SESSION}:cohan_agents" -v "${HERE}" \
     "${ENV_PREFIX} && exec ros2 run cohan_layers agent_filter.py '' --ros-args -p use_sim_time:=true"
 tmux select-layout -t "${SESSION}:cohan_agents" tiled
 
+# -- control: hand the robot to ROS --------------------------------------------
+# nav2 plans and publishes /cmd_vel, but the robot only reads it in its ROS
+# mode. Without this the stack looks healthy and the robot never moves, which
+# is the same trap DRL-VO's control window closes.
+window_control "${SESSION}" "${HERE}" "${ENV_PREFIX}" "${ROBOT}"
+
 # -- rviz ---------------------------------------------------------------------
 window_rviz "${SESSION}" "${HERE}" "${ENV_PREFIX}" "${RVIZ_CONFIG}"
 
@@ -134,4 +146,4 @@ window_rviz "${SESSION}" "${HERE}" "${ENV_PREFIX}" "${RVIZ_CONFIG}"
 window_goal "${SESSION}" "${HERE}" "${ENV_PREFIX}" "${GOAL_HINT}"
 
 session_close "${SESSION}" "robotsnap-baseline stop ${NAME}" \
-    "unity bridge cohan agents cohan_agents rviz goal"
+    "unity bridge cohan agents cohan_agents control rviz goal"

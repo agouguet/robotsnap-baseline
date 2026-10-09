@@ -6,7 +6,7 @@
 # scripts; everything true of *all* methods lives here, so a second method
 # costs a manifest and a run.sh rather than a copy of the launcher.
 #
-# This file is sourced, never executed: bin/robotsnap-baseline and every
+# This file is sourced, never executed: robotsnap-baseline and every
 # method script source it and use the helpers below.
 
 # --- locations ----------------------------------------------------------------

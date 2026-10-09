@@ -73,7 +73,13 @@ tmux attach -t drl_vo
 ```
 
 Six fenetres : `unity`, `bridge`, `drl_vo` (l'observation et la politique),
-`control` (passe le robot sous ROS), `rviz`, `goal`.
+`control` (passe le robot sous ROS), `rviz`, `goal`. La fenetre `rviz` a deux
+vues empilees : la vue du monde (`drl_vo.rviz`), et les marqueurs de
+`../../tools/scene_markers.py` qui y placent les pietons et le but.
+
+Sans le fichier `drl_vo.rviz`, `rviz2` rechargerait `~/.rviz2/default.rviz` —
+la derniere configuration ouverte par l'utilisateur, souvent pour un autre
+montage — et afficherait un ecran vide avec une frame fixe qui n'existe pas ici.
 
 Puis, dans la fenetre `goal` ou depuis n'importe quel terminal :
 
