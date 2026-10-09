@@ -1,0 +1,11 @@
+# Built colcon workspaces and anything an install step downloads. The repository
+# holds sources and pins; everything reproducible is rebuilt into work/.
+work/
+
+# Python byte code.
+__pycache__/
+*.py[cod]
+
+# Editor and OS noise.
+*.swp
+.DS_Store

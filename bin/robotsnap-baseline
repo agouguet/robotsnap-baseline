@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+#
+# One entry point for every baseline.
+#
+# The commands are the same whatever a method is made of: a method that builds a
+# colcon workspace and a method that pulls an image are both "install" then
+# "run". Nobody using a baseline has to know which it is; the manifest says.
+#
+#   list                the methods this repository carries
+#   install <method>    prepare it (build a workspace, pull an image, ...)
+#   check <method>      verify it without starting a simulation
+#   run <method> [...]  start a session: simulator, bridge and the method
+#   stop <method>       stop that session
+#   doctor              what this machine is missing
+#   pins                every version this repository pins
+#   env <method>        the environment a method runs in (for debugging)
+#
+# run/stop forward their remaining arguments to the method's own run.sh, so
+# --headless, --robot and anything a method adds stay available.
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/common.sh
+. "${HERE}/../lib/common.sh"
+
+usage() {
+    sed -n '3,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+cmd_list() {
+    printf '%-14s %-10s %-8s %s\n' METHOD MODE ROS SUMMARY
+    local name manifest line mode summary ros
+    for name in $(method_list); do
+        manifest="$(method_dir "${name}")/method.env"
+        mode="?"; summary=""; ros=""
+        if [ -f "${manifest}" ]; then
+            line="$(. "${manifest}"; printf '%s|%s|%s' "${MODE:-}" "${ROS:-}" "${SUMMARY:-}")"
+            IFS='|' read -r mode ros summary <<< "${line}"
+        fi
+        printf '%-14s %-10s %-8s %s\n' "${name}" "${mode:-?}" "${ros:-}" "${summary:-}"
+    done
+}
+
+cmd_pins() {
+    source_pins
+    printf '# %s\n' "$(baseline_root)/pins.env"
+    grep -vE '^[[:space:]]*(#|$)' "$(baseline_root)/pins.env"
+}
+
+cmd_env() {
+    require_method "${1:-}"
+    require_workspace
+    source_pins 2>/dev/null || true
+    printf '# method:    %s\n' "$(method_dir "$1")"
+    printf '# workspace: %s\n' "$(workspace_root)"
+    printf '# python:    %s\n' "$(venv_python)"
+    printf '# app:       %s\n' "$(unity_app)"
+    printf 'export FASTDDS_BUILTIN_TRANSPORTS=UDPv4\n'
+    printf 'source /opt/ros/%s/setup.bash\n' "${ROS_DISTRO:-humble}"
+    local setup
+    while IFS= read -r setup; do
+        printf 'source %s\n' "${setup}"
+    done < <(method_sources "$1")
+    # A method that builds a workspace sources it last, so its own overlay sits
+    # on top of everything it declared - the same order run.sh uses.
+    local method_workspace
+    method_workspace="$(method_env_value "$1" WORKSPACE)"
+    if [ -n "${method_workspace}" ] && [ -f "$(baseline_root)/${method_workspace}/install/setup.bash" ]; then
+        printf 'source %s\n' "$(baseline_root)/${method_workspace}/install/setup.bash"
+    fi
+    printf 'export PYTHONPATH=%s:${PYTHONPATH}\n' "$(workspace_root)/robotsnap/src"
+}
+
+cmd_install() {
+    require_method "${1:-}"
+    local script
+    script="$(method_dir "$1")/install.sh"
+    [ -f "${script}" ] || die "method '$1' has no install.sh; it needs nothing installed"
+    shift
+    exec "${script}" "$@"
+}
+
+cmd_check() {
+    require_method "${1:-}"
+    local script
+    script="$(method_dir "$1")/check.sh"
+    [ -f "${script}" ] || die "method '$1' has no check.sh"
+    shift
+    exec "${script}" "$@"
+}
+
+cmd_run() {
+    require_method "${1:-}"
+    require_workspace
+    local script
+    script="$(method_dir "$1")/run.sh"
+    shift
+    exec "${script}" "$@"
+}
+
+# Every run.sh answers --stop, so stopping is the same call whatever the method.
+cmd_stop() {
+    require_method "${1:-}"
+    local script
+    script="$(method_dir "$1")/run.sh"
+    shift
+    exec "${script}" --stop "$@"
+}
+
+# --- doctor -------------------------------------------------------------------
+
+# One line per fact: PASS when it is there, WARN when it is optional, FAIL when
+# the thing a launch needs is missing. Nothing is installed and nothing fails
+# hard - doctor answers "what is this machine missing", it does not fix it.
+probe() {
+    local label="$1" level="$2" detail="${3:-}"
+    case "${level}" in
+        ok)   ok   "${label}${detail:+  (${detail})}" ;;
+        warn) warn "${label}${detail:+  (${detail})}" ;;
+        *)    fail "${label}${detail:+  (${detail})}" ;;
+    esac
+}
+
+cmd_doctor() {
+    source_pins
+
+    printf '## machine\n'
+    command -v tmux >/dev/null 2>&1 \
+        && probe "tmux" ok "$(tmux -V 2>/dev/null)" \
+        || probe "tmux" fail "every method runs in a tmux session"
+    command -v git >/dev/null 2>&1 \
+        && probe "git" ok \
+        || probe "git" fail "install.sh clones the upstreams with it"
+    command -v docker >/dev/null 2>&1 \
+        && probe "docker" ok "$(docker --version 2>/dev/null)" \
+        || probe "docker" warn "only image-based methods need it"
+    [ -f "/opt/ros/${ROS_DISTRO:-humble}/setup.bash" ] \
+        && probe "ROS ${ROS_DISTRO:-humble}" ok "/opt/ros/${ROS_DISTRO:-humble}" \
+        || probe "ROS ${ROS_DISTRO:-humble}" fail "source /opt/ros/${ROS_DISTRO:-humble}/setup.bash"
+
+    printf '## workspace\n'
+    local root
+    root="$(workspace_root)"
+    [ -d "${root}/app" ] \
+        && probe "application" ok "${root}/app" \
+        || probe "application" fail "no app/ under ${root}; set ROBOTSNAP_WS"
+    [ -x "$(venv_python)" ] \
+        && probe "virtualenv" ok "$(venv_python)" \
+        || probe "virtualenv" fail "no venv_robotSNAP under ${root}"
+    if [ -x "$(unity_app)" ]; then
+        local found pinned
+        found="$(sha256sum "$(unity_app)" | cut -d' ' -f1)"
+        pinned="${ROBOTSNAP_APP_SHA256:-}"
+        if [ -z "${pinned}" ] || [ "${found}" = "${pinned}" ]; then
+            probe "player build" ok "sha256 ${found:0:12}"
+        else
+            probe "player build" warn "sha256 ${found:0:12} differs from the pinned ${pinned:0:12}"
+        fi
+    else
+        probe "player build" fail "$(unity_app)"
+    fi
+    if [ -x "$(venv_python)" ]; then
+        local missing=""
+        "$(venv_python)" -c "import numpy" 2>/dev/null || missing="${missing} numpy"
+        # rclpy comes from ROS, not from the virtual environment, so it is only
+        # importable once ROS has been sourced - and the nodes always run that
+        # way. The probe sources it exactly as a launch would.
+        ( source_ros >/dev/null 2>&1; "$(venv_python)" -c "import rclpy" 2>/dev/null ) \
+            || missing="${missing} rclpy"
+        [ -z "${missing}" ] \
+            && probe "python modules" ok "numpy, rclpy" \
+            || probe "python modules" fail "missing:${missing}"
+    fi
+
+    printf '## methods\n'
+    local name script level
+    for name in $(method_list); do
+        script="$(method_dir "${name}")/check.sh"
+        if [ -f "${script}" ]; then
+            probe "${name} check" ok "run: robotsnap-baseline check ${name}"
+        else
+            probe "${name} check" warn "no check.sh"
+        fi
+    done
+}
+
+main() {
+    local command="${1:-}"
+    if [ "$#" -gt 0 ]; then shift; fi
+    case "${command}" in
+        ""|help|-h|--help) usage; [ -n "${command}" ] || exit 2 ;;
+        list)    cmd_list "$@" ;;
+        pins)    cmd_pins "$@" ;;
+        env)     cmd_env "$@" ;;
+        install) cmd_install "$@" ;;
+        check)   cmd_check "$@" ;;
+        run)     cmd_run "$@" ;;
+        stop)    cmd_stop "$@" ;;
+        doctor)  cmd_doctor "$@" ;;
+        *)       printf "unknown command '%s'\n\n" "${command}" >&2; usage >&2; exit 2 ;;
+    esac
+}
+
+main "$@"
