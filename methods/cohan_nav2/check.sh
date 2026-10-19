@@ -46,8 +46,18 @@ dpkg -s "${APT}" >/dev/null 2>&1; expect $? "${APT} is installed (the HATEB plug
 
 [ -f "${PARAMS}" ]; expect $? "parameters file is present: ${PARAMS}"
 if [ -f "${PARAMS}" ]; then
-    grep -q 'chassis_link' "${PARAMS}"
-    expect $? "parameters name the robot frame as chassis_link"
+    # `base_link`, not `chassis_link`. The stacks hardcode `base_link` in C++
+    # (invisible_humans_detection's FOOTPRINT_FRAME, HATEB's own wrapper and
+    # visualisation), and the robot's own frame is not one name: the Jackal
+    # publishes its odometry under `chassis_link`, the other prefabs under
+    # `base_link`. The parameters therefore name the one name every stack
+    # agrees on, and tools/frames_alias.py hangs it off whatever body frame
+    # `/odom` announces. Naming `chassis_link` here was the old assumption that
+    # the scenario always loads a Jackal.
+    grep -qE 'robot_base_frame:[[:space:]]*base_link' "${PARAMS}"
+    expect $? "parameters name the robot frame every stack hardcodes (base_link)"
+    [ -f "$(baseline_root)/tools/frames_alias.py" ]
+    expect $? "the shared frame alias that carries the other frame names is present"
     grep -qE 'max_vel_y:[[:space:]]*0' "${PARAMS}"
     expect $? "parameters keep the robot non-holonomic (max_vel_y: 0)"
 fi

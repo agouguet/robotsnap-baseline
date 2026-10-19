@@ -25,7 +25,7 @@ SESSION=drl_vo
 ROBOT=robot_1
 
 MODEL="${HERE}/model/drl_vo.zip"
-RVIZ_CONFIG="${HERE}/drl_vo.rviz"
+RVIZ_CONFIG="$(baseline_root)/tools/scene.rviz"
 GOAL_HINT="$(method_env_value "${NAME}" GOAL_HINT)"
 
 usage() {
@@ -40,7 +40,7 @@ Start DRL-VO and RobotSNAP in a tmux session named '${SESSION}'.
   --stop        stop the '${SESSION}' session and launch nothing
   -h, --help    show this help
 
-Windows: unity bridge drl_vo control rviz goal.
+Windows: unity bridge drl_vo(2) control rviz(2) goal.
 The 'rviz' window has two panes: the world view, and the markers of
 tools/scene_markers.py that put the pedestrians and the goal on it.
 In the 'goal' window: ${GOAL_HINT}
@@ -112,16 +112,15 @@ tmux select-layout -t "${SESSION}:drl_vo" tiled
 # -- control: hand the robot to ROS --------------------------------------------
 window_control "${SESSION}" "${HERE}" "${ENV_PREFIX}" "${ROBOT}"
 
-# -- rviz: the world view, and the markers RViz cannot build on its own -------
-# /simulation/agents and the goal are JSON, so RViz draws neither; the marker
-# node turns them into the crowd and the goal the view would otherwise miss.
-window_rviz "${SESSION}" "${HERE}" "${ENV_PREFIX}" "${RVIZ_CONFIG}"
-pane_split "${SESSION}:rviz" -v "${HERE}" \
-    "${ENV_PREFIX} && exec $(venv_python) $(baseline_root)/tools/scene_markers.py --robot ${ROBOT}"
-tmux select-layout -t "${SESSION}:rviz" tiled
+# -- rviz ---------------------------------------------------------------------
+# The world view and the marker pane both come from lib/common.sh now. This
+# method used to start scene_markers.py itself, which is why it was the only one
+# showing the crowd and the goal: the pane was a line in one run.sh rather than a
+# property of the benchmark. Every method has it.
+window_rviz "${SESSION}" "${HERE}" "${ENV_PREFIX}" "${RVIZ_CONFIG}" "${ROBOT}"
 
 # -- goal ---------------------------------------------------------------------
-window_goal "${SESSION}" "${HERE}" "${ENV_PREFIX}" "${GOAL_HINT}"
+window_goal "${SESSION}" "${HERE}" "${ENV_PREFIX}" "${GOAL_HINT}" "${NAME}" "${ROBOT}"
 
 session_close "${SESSION}" "robotsnap-baseline stop ${NAME}" \
-    "unity bridge drl_vo control rviz(2) goal"
+    "unity bridge drl_vo(2) control rviz(2) goal"

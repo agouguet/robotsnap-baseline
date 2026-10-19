@@ -66,6 +66,11 @@ class ObservationNode(Node):
         self._goal = None
         self._agents = np.zeros(2 * drl_vo_agents.ROWS * drl_vo_agents.COLS)
         self._published = 0
+        #: The episode the history belongs to. The policy reads ten frames of the lidar, so a history
+        #: that survives a scenario change feeds the new episode the last ten scans of the old world -
+        #: a crowd that is not there any more, in a robot frame that has jumped. The episode is read
+        #: from the session clock, which is put back to zero when a scenario is applied.
+        self._episode: float | None = None
 
         self.create_subscription(LaserScan, TOPIC_SCAN, self._on_scan, 10)
         self.create_subscription(Odometry, TOPIC_ODOM, self._on_odom, 10)
@@ -100,7 +105,25 @@ class ObservationNode(Node):
     def _on_state(self, message: String) -> None:
         body = json_body(message.data)
         if body is not None:
+            self._follow_episode(body)
             self._goal = self._robot_goal(body)
+
+    def _follow_episode(self, body: dict) -> None:
+        """Drop the scan history when the session starts a new episode.
+
+        A clock that went backwards is a scenario that was applied: every stream describes a different
+        world from then on, and a history of the one before is worse than no history at all - the
+        policy would drive on ten frames of a crowd that has been rebuilt somewhere else.
+        """
+        now = number(body.get("sim_time_seconds"))
+        if now is None:
+            return
+        if self._episode is not None and now < self._episode - 0.5:
+            self._history.clear()
+            self._scan = None
+            self._agents = np.zeros(2 * drl_vo_agents.ROWS * drl_vo_agents.COLS)
+            self.get_logger().info("new episode: scan history cleared")
+        self._episode = now
 
     def _robot_goal(self, body: dict):
         """The configured robot's goal in the world frame, or ``None``.

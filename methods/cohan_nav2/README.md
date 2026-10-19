@@ -87,13 +87,16 @@ transformation que `agents_adapter.py` dans `../brne/` et `../hateb/` - et publi
 un `TrackedAgent` de type `HUMAN` par agent, avec un segment `TORSO`, comme le
 nœud d'origine.
 
-**`clock_relay.py`** : la pile tourne en `use_sim_time`. RobotSNAP n'emet aucun
-flux d'horloge ; son odometrie porte deja l'heure du simulateur, et le relais la
-republie sur `/clock`. Identique a celui de `../hateb/`.
+**Pas de relais d'horloge** : la passerelle qui sert RobotSNAP au graphe publie
+elle-meme `/clock`, sur le temps simule. La fenetre `agents` en a longtemps lance
+un second, et deux ecrivains sur le meme topic font reculer le temps a chaque
+desaccord : chaque nœud de la pile vidait alors son tampon TF, en boucle, et le
+robot etait pilote contre un arbre de transformations qui disparaissait sans
+arret. Le meme relais a ete retire de `../nav2_dwb/` pour la meme raison.
 
-**Pas de `frames_alias.py`** ici, contrairement a `../hateb/` : en ROS 2 pur,
-`/tf_static` circule normalement. Il suffit de nommer `chassis_link` dans les
-parametres plutot que d'ajouter des reperes.
+**`frames_alias.py`** : la pile de CoHAN-Nav2 nomme `base_link` la ou RobotSNAP
+publie `chassis_link`. Le nœud declare les deux noms comme un seul repere
+(`/tf_static`), ce qui couvre le C++ que les parametres n'atteignent pas.
 
 **Pas de `localization_launch.py`** : il demarre un `map_server` qui publierait
 sa propre carte sur `/map` par-dessus celle de RobotSNAP, et un

@@ -1,0 +1,73 @@
+# La face ROS 1 d'une session RobotSNAP.
+#
+# Une methode ROS 1 ne peut pas rejoindre seule le graphe ROS 2 : il lui faut un
+# maitre ROS 1, un pont vers ROS 2, et une vue ROS 1 des topics que RobotSNAP
+# publie deja. Ces quatre services sont les memes pour toutes les methodes ROS 1,
+# dans cet ordre :
+#
+#   ros-master       le maitre ROS 1 (roscore)
+#   ros-bridge       ros1_bridge : ROS 1 et ROS 2 se voient
+#   method           le conteneur de la methode, lance par sa propre commande
+#   method-adapters  la vue ROS 1 de RobotSNAP : /robot_odom et la foule
+#
+# Tout est sur le reseau de l'hote : le maitre, le pont, la methode et le pont
+# RobotSNAP partagent 127.0.0.1, ce dont ros1_bridge a besoin.
+#
+# La methode ne dit rien de tout cela. Son run.sh pose METHOD_IMAGE,
+# METHOD_LAUNCH, METHOD_ROS_ENV et ROBOT, et demande la commande a lib/common.sh.
+#
+# FASTDDS_BUILTIN_TRANSPORTS=UDPv4 sur le pont : Fast DDS prefere la memoire
+# partagee, que des conteneurs separes ne partagent pas, et le graphe se
+# decouvre alors sans qu'aucun message ne passe. Le transport UDP marche partout.
+
+services:
+  ros-master:
+    image: ${ROS1_MASTER_IMAGE:-ros:noetic}
+    command: stdbuf -o L roscore
+    network_mode: host
+    restart: "no"
+
+  ros-bridge:
+    image: ${ROS1_BRIDGE_IMAGE:?set ROS1_BRIDGE_IMAGE}
+    depends_on:
+      - ros-master
+    network_mode: host
+    environment:
+      - ROS_MASTER_URI=${ROS_MASTER_URI:-http://127.0.0.1:11311}
+      - ROS_IP=127.0.0.1
+      - FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+    entrypoint: ""
+    # No --bridge-all-topics on purpose. That flag makes the bridge pair a topic
+    # that exists on *one* side only, and it did: every ROS 2 topic with a known
+    # ROS 1 mapping was pushed down, /scene/markers included. The Foxy bridge
+    # (rmw_fastrtps 1.3) then aborts with std::bad_alloc after failing to
+    # deserialize that MarkerArray, which killed the whole ROS 1 session -
+    # measured, repeatedly, on CADRL. Without the flag the bridge serves the
+    # topics that really have a reader on the other side (the map, the clock,
+    # the goal, /cmd_vel, the crowd), and leaves a view topic nobody on ROS 1
+    # subscribes to alone.
+    command: bash -c "source /opt/ros/noetic/setup.bash && source /opt/ros/foxy/setup.bash && sleep 2 && exec ros2 run ros1_bridge dynamic_bridge"
+
+  method:
+    image: ${METHOD_IMAGE:?set METHOD_IMAGE}
+    depends_on:
+      - ros-bridge
+    network_mode: host
+    environment:
+      - ROS_MASTER_URI=${ROS_MASTER_URI:-http://127.0.0.1:11311}
+      - ROS_IP=127.0.0.1
+    entrypoint: ""
+    command: bash -c "${METHOD_ROS_ENV} && sleep 4 && exec ${METHOD_LAUNCH}"
+
+  method-adapters:
+    image: ${METHOD_IMAGE:?set METHOD_IMAGE}
+    depends_on:
+      - ros-bridge
+    network_mode: host
+    environment:
+      - ROS_MASTER_URI=${ROS_MASTER_URI:-http://127.0.0.1:11311}
+      - ROS_IP=127.0.0.1
+    entrypoint: ""
+    volumes:
+      - ${ADAPTER_DIR:?set ADAPTER_DIR}:/robotsnap_ros1:ro
+    command: bash -c "${METHOD_ROS_ENV} && sleep 5 && exec python /robotsnap_ros1/robotsnap_ros1_adapter.py --robot ${ROBOT:-robot_1}"

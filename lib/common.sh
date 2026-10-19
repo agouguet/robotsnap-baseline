@@ -119,20 +119,25 @@ require_command() {
 
 # --- sourcing ROS -------------------------------------------------------------
 
-# Source ROS from a script that runs under ``set -u``.
+# Source one setup file from a script that runs under ``set -u``.
 #
-# ROS's own setup scripts read variables they never define - the first line of
-# /opt/ros/humble/setup.bash trips on AMENT_TRACE_SETUP_FILES - so nounset has
-# to be off around them or the source aborts before anything is exported. The
-# previous setting is restored afterwards.
-source_ros() {
-    local distro="${ROS_DISTRO:-humble}" had_u=0 rc=0
+# ROS's own setup scripts, and the ament ones they chain to, read variables they
+# never define - the first line of /opt/ros/humble/setup.bash trips on
+# AMENT_TRACE_SETUP_FILES - so nounset has to be off around them or the source
+# aborts before anything is exported. The previous setting is restored after.
+source_setup() {
+    local path="${1:?source_setup needs a path}" had_u=0 rc=0
     case "$-" in *u*) had_u=1 ;; esac
     set +u
     # shellcheck disable=SC1090,SC1091
-    . "/opt/ros/${distro}/setup.bash" || rc=$?
+    . "${path}" || rc=$?
     [ "${had_u}" = 1 ] && set -u
     return "${rc}"
+}
+
+# The ROS side of the environment, which every method needs.
+source_ros() {
+    source_setup "/opt/ros/${ROS_DISTRO:-humble}/setup.bash"
 }
 
 # --- the environment a method runs in -----------------------------------------
@@ -222,17 +227,113 @@ window_control() {
         "${3} && exec $(venv_python) $(baseline_root)/tools/set_ros_control.py --robot ${4}"
 }
 
+# The view every method shares: one RViz2 on the shared configuration, and one
+# marker pane beside it.
+#
+# RViz draws the map, the scan, the odometry and the TF tree on its own, but the
+# two things that make social navigation *social* - where the people are and
+# where the robot is trying to go - travel as JSON it cannot read. Without the
+# marker node a method showed a map and a robot and the crowd and the goal were
+# missing, while a method that ran it showed all four. That difference was a
+# line in one run.sh and not a fact about the methods, so the pane lives here
+# now and every method gets it.
+#
+# The robot argument is what the markers are drawn around: the bare topic names
+# reach the primary robot and every other answers to /robot_<id>/..., so a view
+# asked for the wrong one would silently follow robot_1.
 window_rviz() {
-    window_new "$1" rviz "$2"
-    if [ -n "${4:-}" ]; then
-        window_run "$1" rviz "${3} && exec rviz2 -d ${4}"
+    local session="$1" dir="$2" prefix="$3" config="${4:-}" robot="${5:-robot_1}"
+    window_new "${session}" rviz "${dir}"
+    if [ -n "${config}" ]; then
+        window_run "${session}" rviz "${prefix} && exec rviz2 -d ${config}"
     else
-        window_run "$1" rviz "${3} && exec rviz2"
+        window_run "${session}" rviz "${prefix} && exec rviz2"
     fi
+    pane_split "${session}:rviz" -v "${dir}" \
+        "${prefix} && exec $(venv_python) $(baseline_root)/tools/scene_markers.py --robot ${robot}"
+    tmux select-layout -t "${session}:rviz" tiled
 }
 
+# The goal a method is meant to reach, as the arguments `scenario_goal.py` wants,
+# or nothing at all for a method that reads the session itself.
+#
+# The interface is a property of the method, so it is written in the method's own
+# manifest beside the rest of what it is - not in its run.sh, where it would be a
+# second place to change and could drift from the hint the window prints.
+goal_interface_arguments() {
+    local name="${1:-}" robot="${2:-robot_1}" interface topic
+    [ -n "${name}" ] || return 0
+    interface="$(method_env_value "${name}" GOAL_INTERFACE)"
+    [ -n "${interface}" ] || return 0
+    topic="$(method_env_value "${name}" GOAL_TOPIC)"
+    printf -- '--interface %s --robot %s' "${interface}" "${robot}"
+    # A method that reads a topic names it; one that answers an action does not.
+    # The test is an `if` and not a `&&`: a trailing false would be this
+    # function's exit status, and every caller runs under `set -e`, where
+    # `arguments="$(goal_interface_arguments ...)"` would then take the whole
+    # launch with it.
+    if [ -n "${topic}" ]; then
+        printf -- ' --topic %s' "${topic}"
+    fi
+    return 0
+}
+
+# The goal window: a shell to send a goal by hand, and - when the method declares
+# one - the pane that hands it the scenario's own goal.
+#
+# Both are wanted. A scenario says where the robot has to go, and a method that
+# never hears it stands still until somebody types one; but a benchmark also has
+# to *try* a goal the scenario does not carry, which is what the shell is for.
 window_goal() {
-    window_new "$1" goal "$2"
-    window_run "$1" goal "$3"
-    window_run "$1" goal "echo '${4}'"
+    local session="$1" dir="$2" prefix="$3" hint="${4:-}" name="${5:-}" robot="${6:-robot_1}"
+    window_new "${session}" goal "${dir}"
+    window_run "${session}" goal "${prefix}"
+    window_run "${session}" goal "echo '${hint}'"
+
+    local arguments
+    arguments="$(goal_interface_arguments "${name}" "${robot}")"
+    [ -n "${arguments}" ] || return 0
+
+    pane_split "${session}:goal" -h "${dir}" \
+        "${prefix} && exec $(venv_python) $(baseline_root)/tools/scenario_goal.py ${arguments}"
+    tmux select-layout -t "${session}:goal" tiled
+}
+
+# --- les methodes ROS 1 -------------------------------------------------------
+
+# Une methode ROS 1 a besoin de trois choses de plus qu'une methode ROS 2 : un
+# maitre ROS 1, un pont entre ce maitre et le graphe ROS 2, et une vue ROS 1 des
+# topics de RobotSNAP. Les trois sont dans tools/ros1/compose.yaml, une fois pour
+# toutes ; une methode ne dit que ce qu'elle est (son image, sa commande, son
+# environnement ROS 1). C'est ce qui evite que chaque methode recopie un pont.
+
+ros1_project() {
+    printf 'robotsnap_%s\n' "$1"
+}
+
+# La commande qui monte la session ROS 1 d'une methode, telle qu'on la tape dans
+# un pane tmux. `%q` met chaque valeur a l'abri : un chemin avec une espace, une
+# commande avec des guillemets n'ont pas besoin d'etre echappes a la main.
+ros1_up_command() {
+    local name="$1" image="$2" launch="$3" ros_env="$4" robot="$5"
+    printf 'ROS1_BRIDGE_IMAGE=%q METHOD_IMAGE=%q METHOD_LAUNCH=%q METHOD_ROS_ENV=%q ADAPTER_DIR=%q ROBOT=%q docker compose -p %q -f %q up --remove-orphans' \
+        "${ROS1_BRIDGE_IMAGE:?pins.env must define ROS1_BRIDGE_IMAGE}" \
+        "${image}" "${launch}" "${ros_env}" \
+        "$(baseline_root)/tools/ros1" "${robot}" \
+        "$(ros1_project "${name}")" "$(baseline_root)/tools/ros1/compose.yaml"
+}
+
+# L'arret. `docker compose down` tue les quatre services ; tuer le client compose
+# ne suffit pas, comme pour tout conteneur lance par un pane tmux.
+#
+# `down` reinterpole tout le fichier avant de savoir qu'il n'a rien a monter,
+# donc les variables que le compose garde avec `:?` doivent exister meme si
+# `down` ne s'en sert pas - sinon la commande est refusee et les conteneurs
+# restent debout. Elles sont posees ici a des valeurs inertes, la ou `up` porte
+# les vraies.
+ros1_down_command() {
+    local name="$1"
+    printf 'ROS1_BRIDGE_IMAGE=%q METHOD_IMAGE=%q METHOD_LAUNCH=%q METHOD_ROS_ENV=%q ADAPTER_DIR=%q ROBOT=%q docker compose -p %q -f %q down --remove-orphans --timeout 5' \
+        "${ROS1_BRIDGE_IMAGE:-unused}" unused unused unused /tmp unused \
+        "$(ros1_project "${name}")" "$(baseline_root)/tools/ros1/compose.yaml"
 }

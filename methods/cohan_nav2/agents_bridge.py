@@ -40,7 +40,10 @@ from cohan_msgs.msg import (
 from nav_msgs.msg import Odometry
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import Empty, String
+
+#: A non-blocking signal from scenario_goal after the Nav2 goal was canceled.
+EPISODE_RESET_TOPIC = "/robotsnap/episode_reset"
 
 #: The frame every tracked agent is expressed in, as the upstream bridge does.
 WORLD_FRAME = "map"
@@ -93,6 +96,7 @@ class TrackedAgentsBridge(Node):
         self._odom: Odometry | None = None
         self.create_subscription(Odometry, "/odom", self._store_odom, 10)
         self.create_subscription(String, "/simulation/agents", self._on_agents, 10)
+        self.create_subscription(Empty, EPISODE_RESET_TOPIC, self._on_episode_reset, 10)
         self._publisher = self.create_publisher(TrackedAgents, "/tracked_agents", 10)
 
     def _store_odom(self, message: Odometry) -> None:
@@ -106,6 +110,17 @@ class TrackedAgentsBridge(Node):
         tracked = self._to_tracked(message.data, odom)
         if tracked is not None:
             self._publisher.publish(tracked)
+
+    def _on_episode_reset(self, _message: Empty) -> None:
+        """Forget the previous episode's pose and clear the planner's crowd."""
+        self._odom = None
+        tracked = TrackedAgents()
+        tracked.header.frame_id = WORLD_FRAME
+        tracked.header.stamp = self.get_clock().now().to_msg()
+        self._publisher.publish(tracked)
+        self.get_logger().info(
+            "episode reset: odometry forgotten and empty /tracked_agents published"
+        )
 
     def _to_tracked(self, payload: str, odom: Odometry) -> TrackedAgents | None:
         try:

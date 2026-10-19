@@ -72,14 +72,28 @@ robotsnap-baseline run     drl_vo
 tmux attach -t drl_vo
 ```
 
-Six fenetres : `unity`, `bridge`, `drl_vo` (l'observation et la politique),
-`control` (passe le robot sous ROS), `rviz`, `goal`. La fenetre `rviz` a deux
-vues empilees : la vue du monde (`drl_vo.rviz`), et les marqueurs de
-`../../tools/scene_markers.py` qui y placent les pietons et le but.
+Six fenetres : `unity`, `bridge`, `drl_vo(2)` (l'observation et la politique),
+`control` (passe le robot sous ROS), `rviz(2)` et `goal`. La fenetre `rviz` a
+deux vues empilees : la vue partagee de toutes les baselines
+(`../../tools/scene.rviz`), et les marqueurs de `../../tools/scene_markers.py`
+qui y placent les pietons et le but. Les deux viennent maintenant de
+`window_rviz` dans `lib/common.sh`, comme pour toutes les methodes : cette
+integration lancait le nœud de marqueurs elle-meme, et c'est pour cela qu'elle
+etait la seule a montrer la foule et le but.
 
-Sans le fichier `drl_vo.rviz`, `rviz2` rechargerait `~/.rviz2/default.rviz` —
-la derniere configuration ouverte par l'utilisateur, souvent pour un autre
-montage — et afficherait un ecran vide avec une frame fixe qui n'existe pas ici.
+La fenetre `goal` n'a ici qu'un pane, et c'est voulu : l'observation lit le but
+du scenario directement dans `/simulation/state`, donc le robot part des le
+debut de l'episode et il n'y a rien qu'un second expediteur pourrait ajouter.
+Les methodes qui ecoutent une action ou un topic, elles, recoivent un second
+pane qui leur remet ce meme but (`../../tools/scenario_goal.py`).
+
+La vue est la meme pour toutes les methodes, a dessein : deux methodes qui
+apportent chacune la leur obligent a comparer des images qui ne montrent pas la
+meme chose. Ses affichages sont ranges en dossiers — `RobotSNAP`, `Crowd`,
+`Planner`, `Costmaps` — et chaque methode allume ce qu'elle publie. Sans ce
+fichier, `rviz2` rechargerait `~/.rviz2/default.rviz`, souvent regle pour un
+autre montage, et afficherait un ecran vide avec une frame fixe qui n'existe pas
+ici.
 
 Puis, dans la fenetre `goal` ou depuis n'importe quel terminal :
 

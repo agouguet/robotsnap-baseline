@@ -9,9 +9,11 @@ cannot read: where the people are, and where the robot is trying to go. This
 node reads them and republishes what they say as one ``MarkerArray`` in the
 ``map`` frame:
 
-* every agent of ``/simulation/agents``, which Unity publishes in the **robot**
-  frame, moved into ``map`` by the robot pose of ``/odom`` - the same transform
-  CoHAN-Nav2's ``agents_bridge.py`` applies, so the two views agree;
+* the crowd, read from the ``humans`` of ``/simulation/state`` - which are
+  already in the world frame, so they are drawn exactly where the scenario put
+  them - and falling back, when that snapshot names nobody, to the agents of
+  ``/simulation/agents``, which Unity publishes in the **robot** frame and which
+  are then placed with the robot pose of the instant they were measured;
 * the robot itself, as an arrow along its heading, taken from ``/odom`` (the one
   pose the gateway publishes that is in the map frame, since ``map -> odom`` is
   the identity);
@@ -19,6 +21,17 @@ node reads them and republishes what they say as one ``MarkerArray`` in the
 
 ``--robot`` picks which one to draw: the primary robot answers to the bare topic
 names, every other to its own ``/robot_<id>/...``.
+
+Why the crowd is *not* rebuilt on every odometry tick. The agents of
+``/simulation/agents`` are expressed in the robot frame, so they only mean
+anything against the robot pose they were measured from. Rebuilding them each
+time ``/odom`` arrives - which is what this node used to do, several times per
+agent snapshot - rotates the whole crowd with the robot between two snapshots,
+and the crowd snaps back to its true place when the next snapshot lands. At a
+walking rotation that is a swing of up to a radian, largest exactly while the
+robot turns, which is the jitter the crowd display had. The crowd is therefore
+frozen when it is measured and only re-stamped afterwards. The robot's own
+marker does follow every odometry tick, which is the one thing that should.
 
 It is deliberately not method-specific: any integration that wants to *see* the
 crowd can put this in a pane. Nothing it publishes is read back by a controller.
@@ -33,6 +46,7 @@ import math
 import rclpy
 from geometry_msgs.msg import Point, Vector3
 from nav_msgs.msg import Odometry
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
@@ -111,6 +125,70 @@ def _number(value, default: float = 0.0) -> float:
     return float(value)
 
 
+def _xy(entry) -> tuple[float, float] | None:
+    """``(x, y)`` of one agent or human entry, or ``None`` when it carries none."""
+    if not isinstance(entry, dict):
+        return None
+    x, y = _number(entry.get("x"), None), _number(entry.get("y"), None)
+    if x is None or y is None:
+        return None
+    return x, y
+
+
+def _agent_entries(payload: String) -> list[dict]:
+    """The ``agents`` of a ``/simulation/agents`` body, as a list of dicts."""
+    if payload is None:
+        return []
+    try:
+        body = json.loads(payload.data)
+    except (TypeError, ValueError):
+        return []
+    entries = body.get("agents") if isinstance(body, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _world_crowd(humans) -> list[tuple[int, float, float]]:
+    """The ``humans`` of ``/simulation/state`` as ``(id, x, y)``.
+
+    Those coordinates are already in the ``map`` frame, so nothing has to be
+    applied to them: this is the same source the Python viewer draws, and the two
+    therefore agree to the centimetre.
+    """
+    crowd: list[tuple[int, float, float]] = []
+    for index, entry in enumerate(humans):
+        point = _xy(entry)
+        if point is None:
+            continue
+        crowd.append((_agent_id(entry, index), point[0], point[1]))
+    return crowd
+
+
+def _robot_frame_crowd(entries, odom: Odometry) -> list[tuple[int, float, float]]:
+    """Robot-frame agent entries as ``(id, x, y)`` in ``map``, via ``odom``'s pose.
+
+    This is the fallback for a snapshot that names no human, and it is the only
+    place the two frames meet: the entries are rotated and translated once, here,
+    so that nothing downstream ever has to do it again on a fresher pose.
+    """
+    pose = odom.pose.pose
+    yaw = yaw_from_quaternion(pose.orientation)
+    cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
+    robot_x, robot_y = pose.position.x, pose.position.y
+
+    crowd: list[tuple[int, float, float]] = []
+    for index, entry in enumerate(entries):
+        point = _xy(entry)
+        if point is None:
+            continue
+        # Robot frame -> map frame, the same rotation CoHAN's bridge uses.
+        world_x = robot_x + cos_yaw * point[0] - sin_yaw * point[1]
+        world_y = robot_y + sin_yaw * point[0] + cos_yaw * point[1]
+        crowd.append((_agent_id(entry, index), world_x, world_y))
+    return crowd
+
+
 class SceneMarkers(Node):
     """Republish what the JSON streams say as markers RViz can draw."""
 
@@ -119,7 +197,13 @@ class SceneMarkers(Node):
         self._robot = robot
         self._odom: Odometry | None = None
         self._agents: String | None = None
+        #: The ``humans`` of the last ``/simulation/state``, world frame, or
+        #: ``None`` when that snapshot named none and the fallback has to run.
+        self._humans: list[dict] | None = None
         self._goal: tuple[float, float] | None = None
+        #: The crowd as ``(id, x, y)`` in ``map``, frozen at the instant it was
+        #: measured. An odometry tick re-stamps it but never moves it.
+        self._crowd: list[tuple[int, float, float]] = []
 
         self.create_subscription(Odometry, robot_topic(robot, ODOM), self._on_odom, 10)
         self.create_subscription(String, robot_topic(robot, AGENTS), self._on_agents, 10)
@@ -136,6 +220,7 @@ class SceneMarkers(Node):
 
     def _on_agents(self, message: String) -> None:
         self._agents = message
+        self._refresh_crowd()
         self._republish()
 
     def _on_state(self, message: String) -> None:
@@ -143,7 +228,9 @@ class SceneMarkers(Node):
             body = json.loads(message.data)
         except (TypeError, ValueError):
             return
-        if not isinstance(body, dict) or not body.get("robot_has_goal"):
+        if not isinstance(body, dict):
+            return
+        if not body.get("robot_has_goal"):
             self._goal = None
         else:
             goal = body.get("robot_goal")
@@ -152,7 +239,29 @@ class SceneMarkers(Node):
                 if isinstance(goal, dict)
                 else None
             )
+        humans = body.get("humans")
+        self._humans = (
+            [entry for entry in humans if isinstance(entry, dict)]
+            if isinstance(humans, list)
+            else None
+        )
+        self._refresh_crowd()
         self._republish()
+
+    def _refresh_crowd(self) -> None:
+        """Freeze the crowd at the instant the newest snapshot measured it.
+
+        The world-frame humans win when they are there, because they need no pose
+        to be placed and so nothing about them can drift. The robot-frame agents
+        are the fallback, and they are placed here - once, with the pose of the
+        instant they arrived - rather than on every odometry tick.
+        """
+        if self._humans:
+            self._crowd = _world_crowd(self._humans)
+            return
+        if self._odom is None:
+            return
+        self._crowd = _robot_frame_crowd(_agent_entries(self._agents), self._odom)
 
     # -- output ------------------------------------------------------------
 
@@ -169,7 +278,7 @@ class SceneMarkers(Node):
         markers.markers.append(self._robot_marker(stamp, odom))
         if self._goal is not None:
             markers.markers.extend(self._goal_markers(stamp))
-        markers.markers.extend(self._agent_markers(stamp, odom))
+        markers.markers.extend(self._agent_markers(stamp))
         self._publisher.publish(markers)
 
     def _clear_marker(self) -> Marker:
@@ -240,42 +349,23 @@ class SceneMarkers(Node):
         label.text = "goal"
         return [sphere, label]
 
-    def _agent_markers(self, stamp, odom: Odometry) -> list[Marker]:
-        payload = self._agents
-        if payload is None:
-            return []
-        try:
-            body = json.loads(payload.data)
-        except (TypeError, ValueError):
-            return []
-        entries = body.get("agents") if isinstance(body, dict) else None
-        if not isinstance(entries, list):
-            return []
+    def _agent_markers(self, stamp) -> list[Marker]:
+        """The frozen crowd, written out again under a fresh stamp.
 
-        pose = odom.pose.pose
-        yaw = yaw_from_quaternion(pose.orientation)
-        cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
-        robot_x, robot_y = pose.position.x, pose.position.y
-
+        Both frames of a marker are ``map``, so nothing downstream has to resolve
+        a transform to draw it, and re-stamping cannot move it: only the
+        positions the snapshot measured are in :attr:`_crowd`.
+        """
         markers: list[Marker] = []
-        for index, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                continue
-            x, y = entry.get("x"), entry.get("y")
-            if isinstance(x, bool) or isinstance(y, bool):
-                continue
-            if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-                continue
-
-            # Robot frame -> map frame, the same rotation CoHAN's bridge uses.
-            world_x = robot_x + cos_yaw * x - sin_yaw * y
-            world_y = robot_y + sin_yaw * x + cos_yaw * y
-
+        for identifier, world_x, world_y in self._crowd:
             marker = Marker()
             marker.header.frame_id = WORLD_FRAME
             marker.header.stamp = stamp
             marker.ns = "agents"
-            marker.id = index
+            # The colour follows the agent, not the position in the list: a crowd that
+            # reorders, or loses a member, would otherwise walk every colour down one
+            # place and look like the people were swapped.
+            marker.id = identifier
             marker.type = Marker.CYLINDER
             marker.action = Marker.ADD
             marker.pose.position = Point(
@@ -285,9 +375,29 @@ class SceneMarkers(Node):
             marker.scale = Vector3(
                 x=2 * AGENT_RADIUS, y=2 * AGENT_RADIUS, z=AGENT_HEIGHT
             )
-            _color(marker, AGENT_COLORS[index % len(AGENT_COLORS)])
+            _color(marker, AGENT_COLORS[marker.id % len(AGENT_COLORS)])
             markers.append(marker)
         return markers
+
+
+def _agent_id(entry: dict, fallback: int) -> int:
+    """A stable small integer for one agent of ``/simulation/agents``.
+
+    RobotSNAP writes the id as a JSON string (``"0"``); a bare number is accepted
+    too. Anything else - a name, a missing key - falls back to the position in the
+    list, so the marker still gets an id and the display still shows the crowd.
+    """
+    raw = entry.get("id")
+    if isinstance(raw, bool) or raw is None:
+        return fallback
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return fallback
+    return fallback
 
 
 def main(argv=None) -> int:
@@ -303,7 +413,10 @@ def main(argv=None) -> int:
     node = SceneMarkers(arguments.robot)
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    # Killed by a session stop, `spin` comes back as an ExternalShutdownException
+    # rather than a KeyboardInterrupt; every other tool of the benchmark catches
+    # both, and without it the stop leaves a traceback in the pane.
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
